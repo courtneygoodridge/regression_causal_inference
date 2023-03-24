@@ -1,0 +1,576 @@
+---
+title: "Statistical Rethinking - Book examples and examples with my data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+if(!require(here)) install.packages("here")
+library(here)
+
+if(!require(ggplot2)) install.packages("ggplot2")
+library(ggplot2)
+
+if(!require(dplyr)) install.packages("dplyr")
+library(dplyr)
+
+if(!require(tidyr)) install.packages("tidyr")
+library(tidyr)
+
+if(!require(viridis)) install.packages("viridis")
+library(viridis)
+
+if(!require(rstan)) install.packages("rstan")
+library(rstan)
+
+if(!require(cmdstanr)) install.packages("cmdstanr")
+library(cmdstanr)
+
+devtools::install_github("rmcelreath/rethinking")
+library(rethinking)
+```
+
+## Loading data
+
+```{r}
+# driving data
+example.bends <- read.csv(file = here::here("intro_to_multilevel_models/example.bends.csv"))
+
+example.bends <- example.bends %>%
+  dplyr::mutate(road.contrast = case_when(dn == "D" ~ "Full flow",
+                                          dn == "N" ~ "Reduced flow")) %>%
+  dplyr::mutate(road.contrast = as.factor(road.contrast))
+
+example.bends.full <- example.bends %>%
+  dplyr::filter(road.contrast == "Full flow")
+
+# distribution of TTLCtakeover
+ggplot() +
+  geom_density(example.bends.full, mapping = aes(x = ttlc.takeover))
+```
+
+## A Gaussian model for TTLCtakeover predicted by TTLCfailure
+
+Before we dive into our statistical model, we need to construct a generative (scientific) model. This can be done in the form of a DAG. This helps to explain the causal relationships between our variables. If we want to estimate TTLCtakeover as a function of TTLCfailure, the DAG could be as follows:
+
+TTLC_f -> TTLC_t <- (U)
+
+This means that failure criticality influences TTLCtakeover and also that unobserved variables also influence TTLCtakeover. These unobserved variables are ones that we have not measured. We can then use this scientific model to simulate synthetic data and investigate whether it generates data that we believe to be similar to our actual data (based on our expert knowledge).
+
+# Simulate some synthetic data to test the generative (scientific) model
+
+We simulate our unobserved variable (U) as a Gaussian distribution centred on 0 with a SD. TTLCtakeover is comprised as a function of a beta_1 parameter that quantifies the influence of TTLCfailure. We then add the influence of the unobserved variable (U). We can choose any value of beta_1 and SD to generate this synthetic data until we are reasonably sure it generates the data we think the process generates. 
+
+```{r}
+# function for simulating TTLCtakeovers from TTLCfailure values
+sim_ttlc_takeover <- function(ttlc.failure, beta_1, sd){
+  # Gaussian distributed for unobserved variables
+  U <- rnorm(length(ttlc.failure), 0, sd)
+  
+  # Predicting TTLCtakeover as a function of beta_1 and the unobserved variable
+  
+  ttlc.takeover <- beta_1 * ttlc.failure + U
+  return(ttlc.takeover)
+}
+
+ttlc.failure <- runif(100, min = 1, max = 3)
+
+ttlc.takeover <- sim_ttlc_takeover(ttlc.failure, .5, sd = .3)
+
+ggplot() +
+  geom_point(aes(x = ttlc.failure, y = ttlc.takeover))
+```
+
+# Specifying a statistical model
+
+Now that we are happy with the generative model, we can specify our statistical model. This model will use parameters to predict the mean of the Gaussian distribution (mu) into a linear function of the predictor variable and some other parameter that we invent. We instruct the model that the predictor has a constant and additive relationship to the mean of the outcome variable. The model then computes a posterior distribution highlighting the influence of this parameter on the mean of the outcome (and the value of the other parameter).
+
+For each combination of parameter values, the model computers the posterior probability which measure the relative plausibility, given the data and the model. The posterior distribution thus provides the different strengths of association given the our assumptions (that we have programmed into the model).
+
+# Linear model with one predictor
+
+(1) TTLCtakeover_i ~ Normal(mu_i, sigma) *(likelihood)*
+
+(2) mu_i = beta_0 + beta_1_x_i  *(linear model)*
+
+(3) beta_0 ~ Normal(0, 1) *(prior)*
+
+(4) beta_1 ~ Normal(0, 1) *(prior)*
+
+(5) sigma ~ Uniform(0, 1) *(prior)*
+
+
+Line (1) denotes the probability of the data AKA the likelihood. 
+
+Line (2) denotes the linear model part of this equation has an *=* rather than a *~*. This is because the relationship is deterministic (if we known beta_0 and beta_1 then we known mu_i). beta_0 and beta_1 are imaginary parameters that we have invented and can be manipulated to alter mu_i. This is different to the previous model where mu and sigma were necessary to describe the Gaussian distribution. 
+
+The following lines are priors for the model parameters. Line (3) represents the prior for the intercept (beta_0) which represents the value of mu_i when x_i is zero. In this example, x_i denotes the TTLCfailure criticality. Hence a TTLCfailure of 0 represents an instantaneous crash. Therefore the beta_0 parameter takes on the interpretation as the fastest someone could respond.
+
+Line (4) denotes the prior for the slope parameter (beta_1) that represents the expected change in TTLCtakeover for a 1 unit increase in TTLCfailure.
+
+Line (5) denotes the prior for the sigma parameter.
+
+# Using the generative model to inform the statistical model
+
+Before we let out model loose on our real data, we first need to use the synthetic data to see if our model can recover the simulated parameters. However, we first start with our prior distribution. 
+
+# Prior predictive simulations
+
+The current priors have the beta_1 parameter being modelled as a Gaussian distribution centred on 0. This gives equal weighting to the effect on TTLCfailure to be positive or negative. However, we know from the literature that as drivers have more time budget, their safety margin for responses increases. So this prior seems unreasonable. To prove this, we should simulate regression lines (values of beta_0 and beta_1) to see if they match our a priori expectations (that TTLCtakeover should increase with TTLCfailure). If they do note, we might need to alter our prior distributions to match our expectations.
+
+```{r}
+set.seed(2971)
+
+# sample size and priors for intercept and slope
+n <- 25
+beta_0 <- rnorm(n, 0, 1)
+beta_1 <- rnorm(n, 0, 1)
+
+
+plot(NULL, xlim = range(ttlc.failure), ylim = c(0, 6), xlab = "TTLCfailure", ylab = "TTLCtakeover")
+mtext("beta_1 ~ dnorm(0, 1)")
+
+for (i in 1:n)
+  
+  abline(a = beta_0[i], b = beta_1[i], lwd = 2, col = 2)
+```
+
+Based on the priors, without seeing any synthetic data the model considers it plausible that as time budget increases, safety margin decreases. From our expertise, we know this is likely to be false. Therefore, we can rule out negative values of beta_1. We can do this by suggesting a uniform prior between 0 and 1 for beta_1. That way, we are assuming the effect of time budget on safety margin will be positive but we are uncertain as to the specific size of the effect. 
+
+```{r}
+set.seed(2971)
+
+# sample size and priors for intercept and slope
+n <- 25
+beta_0 <- rnorm(n, 0, 1)
+beta_1 <- runif(n, 0, 1)
+
+# prior distribution for the beta_1 parameter
+curve(dunif(x, 0, 1), from = 0.3, to = 3)
+
+#
+plot(NULL, xlim = range(ttlc.failure), ylim = c(0, 6), xlab = "TTLCfailure", ylab = "TTLCtakeover")
+mtext("beta_1 ~ dunif(0, 1)")
+
+for (i in 1:n)
+  
+  abline(a = beta_0[i], b = beta_1[i], lwd = 2, col = 2)
+```
+
+This prior seems more reasonable. Sometimes the slopes are bit steeper (high safety margins for higher time budgets). However we could be even more specific based on our expertise. Based on previous research, we know that the effect of criticality on safety margin was between .32 and .41 (Mole et al, 2020). Hence we could specify a uniforma prior between these ranges. 
+
+```{r}
+set.seed(2971)
+
+# sample size and priors for intercept and slope
+n <- 25
+beta_0 <- rnorm(n, 0, 1)
+beta_1 <- runif(n, .32, .41)
+
+# prior distribution for the beta_1 parameter
+curve(dunif(x, .32, .41), from = 0, to = .5)
+
+plot(NULL, xlim = range(ttlc.failure), ylim = c(0, 6), xlab = "TTLCfailure", ylab = "TTLCtakeover")
+mtext("beta_1 ~ runif(.32, .41)")
+
+for (i in 1:n)
+  
+  abline(a = beta_0[i], b = beta_1[i], lwd = 2, col = 2)
+```
+
+However, the experiments were slightly different thus we might not expect the effects to be exactly like this. Also this puts a lot of density on a small range of beta_1 parameter values and tell the model, before it's seen any data, that there is 0 probability of the beta_1 values being outside this range. This once again seems unlikely. 
+
+So maybe the prior could be centred on the mean parameter estimate for the effect of criticality from Mole et al (2020) (beta_f = .36) but as a log normmal distribution. Setting the prior as a log normal distribution means that beta_1 has to be positive. Based on our research (McDonald et al, 2019; Mole et al, 2020) We can be confident of this. These once again provides regression lines that seem reasonable before we have seen any data.
+
+```{r}
+set.seed(2971)
+
+# sample size and priors for intercept and slope
+n <- 25
+beta_0 <- rnorm(n, 0, 1)
+beta_1 <- rlnorm(n, .36, 1)
+
+# prior distribution for the beta_1 parameter
+curve(dlnorm(x, .36, 1), from = 0, to = .5)
+
+plot(NULL, xlim = range(ttlc.failure), ylim = c(0, 10), xlab = "TTLCfailure", ylab = "TTLCtakeover")
+mtext("beta_1 ~ rlnorm(0, 1)")
+
+for (i in 1:n)
+  
+  abline(a = beta_0[i], b = beta_1[i], lwd = 2, col = 2)
+```
+
+# Be careful of p-hacking
+
+P-hacking in frequentist statistics is changing aspects of the model once you have seen the data. In Bayesian analysis, the p values are not needed. However if we set priors after looking at the data, we can hack our way to alternative estimates. Therefore the priors should be judged against facts (ie. previous analyses, previous research) - not the sample. 
+
+# Fitting a model on our sythetic data
+
+We can fit a model to the syntehtic data and see how well it recover the initial parameter values we provide the simulation. Note how when we specify beta_1 in the *sim_ttlc_takeover()* at .5 and the SD as .3, the model recovers the beta_1 parameter as .52 and sigma as .28 (via the *precis()* function). 
+
+If we change the initial simulation to be beta_1 = .7 and sigma to be .1, the model recovers the parameter values again. 
+
+This is an example of simulation based calibration. We have tested our statistical model with simulated observations from the scientific model. The model can recover the parameter values delivered in the simulation and the simulated observations produce behaviours we can be confident in. We can now let the model loose on real data. 
+
+```{r}
+# function for simulating TTLCtakeovers from TTLCfailure values
+sim_ttlc_takeover <- function(ttlc.failure, beta_1, sd){
+  U <- rnorm(length(ttlc.failure), 0, sd)
+  ttlc.takeover <- beta_1 * ttlc.failure + U
+  return(ttlc.takeover)
+}
+
+ttlc.failure <- runif(100, min = 1, max = 3)
+
+ttlc.takeover <- sim_ttlc_takeover(ttlc.failure, beta_1 = .7, sd = .1)
+
+formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
+                      mu <- beta_0 + beta_1 * ttlc.failure,
+                      beta_0 ~ dnorm(0, 1),
+                      beta_1 ~ dlnorm(.36, 1),
+                      sigma ~ dunif(0, 1))
+
+m4.3 <- quap(formula_list, data = list(ttlc.takeover = ttlc.takeover, ttlc.failure = ttlc.failure))
+
+precis(m4.3)
+
+# simulating ttlc.takeover as a function of ttlc.failure from the prior distributions specified in the model
+prior <- extract.prior(m4.3)
+
+mu <- link(m4.3, post = prior, data = list(ttlc.failure = c(1, 3)))
+
+plot(NULL, xlim = c(1, 3), ylim = c(0, 10))
+for(i in 1:50) lines(c(1, 3), mu[i, ], col = col.alpha("black", .4))
+```
+
+# Letting the model loose on our real data
+
+Now we fit our model to the data with Log Normal prior on the beta_1 parameter on our real data. The model is as follows:
+
+TTLCtakeover_i ~ Normal(mu_i, sigma) *(likelihood)*
+
+mu_i = beta_0 + beta_1_x_i  *(linear model)*
+
+beta_0 ~ Normal(0, 1) *(prior)*
+
+beta_1 ~ LogNormal(.36, 1) *(prior)*
+
+sigma ~ Uniform(0, 1) *(prior)*
+
+In this model, mu is no longer a parameter. Rather, we use beta_0 and beta_1 to estimate mu. In this sense, parameters are just tools that we use to estimate things things.
+
+```{r}
+formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
+                      mu <- beta_0 + beta_1 * ttlc.failure,
+                      beta_0 ~ dnorm(0, 1),
+                      beta_1 ~ dlnorm(.36, 1),
+                      sigma ~ dunif(0, 1))
+
+m4.4 <- quap(formula_list, data = example.bends.full)
+```
+
+# Finding and interpreting the posterior distribution
+
+Rather than looking only at tables, it can be better to plot different aspects of your posterior distribution to give an assessment of:
+
+1) What the fitting procedure actually worked.
+2) The absolute magnitude of a relationship between an outcome and predictor.
+3) The uncertainty of the average relationship. 
+4) The uncertainty of implied predictions of the model. 
+
+The table below provides the marginal posterior distribution of the parameters for beta_0, beta_1, and sigma (i.e. the value of a parameter averaging over everything else).
+
+beta_1 tells us that for every 1 s increase time budget, safety margins increases by 0.62 s. The 89% credible interval suggests that the probability is situated between an increase in .58 s and .67 s. No effect of time budget is thus very unlikely. There is also very little covariation between the parameters.
+
+```{r}
+precis(m4.4)
+round(vcov(m4.4), 3)
+```
+
+# Plotting the posterior distribution
+
+To begin with, we start with the simplest (but ill-advised) solution. We plot the mean of the posterior against the data. First we draw samples from the posterior distribution (it's a joint multidimensional distribution because we have estimated beta_0, beta_1, and sigma). Then we calculate the mean and plot them.
+
+```{r}
+post <- extract.samples(m4.4)
+beta_0_map <- mean(post$beta_0) 
+beta_1_map <- mean(post$beta_1)
+
+ggplot() +
+  geom_point(example.bends.full, mapping = aes(x = ttlc.failure, y = ttlc.takeover), position = position_jitter(seed = 42, width = 0.02), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_abline(mapping = aes(intercept = beta_0_map, slope = beta_1_map)) +
+  ylim(.3, 2.5)
+```
+
+# Adding uncertainty
+
+The posterior distribution consider the uncertainty for all combinations of beta_0 and beta_1 parameters. It could be that there are lots of regression lines that are similar in terms of probability. Alternatively, it could be that the posterior distribution is narrow towards a select few regression lines. We can demonstrate how the uncertainty changes in our estimate as we receive more data. We start with 10 and double the number of observations
+
+```{r}
+n <- c(10, 20, 40, 100)
+
+for(i in 1:4){
+  
+  n.i <- n[i]
+  
+  dn <- example.bends.full[1:n.i, ]
+  
+  formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
+                      mu <- beta_0 + beta_1 * ttlc.failure,
+                      beta_0 ~ dnorm(0, 1),
+                      beta_1 ~ dlnorm(.36, 1),
+                      sigma ~ dunif(0, 1))
+  
+  mn <- quap(formula_list, data = dn)
+  
+  post <- extract.samples(mn, n = 20)
+  
+  print(ggplot() +
+          geom_point(dn, mapping = aes(x = ttlc.failure, y = ttlc.takeover), position = position_jitter(seed = 42, width = 0.02), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+          geom_abline(post, mapping = aes(intercept = beta_0, slope = beta_1), alpha = .25) +
+          ylim(.3, 2.5) +
+          ggtitle(paste(n[i])))
+}
+```
+
+# Uncertainty intervals around the estimate
+
+Below we construct a probability distribution of predicted means of TTLCtakeover when TTLCfailure = 2 s. We can also find the 89% credible intervals for this value of TTLCtakeover using the *PI()* function. What this actually means is that 89% of the ways to produce the data place the average TTLCtakeover between 1.15 and 1.19 s when TTLCfailure = 2 s.
+
+```{r}
+# using the mode parameters to compute mu_i when TTLCfailure = 2 s
+mu_at_2 <- post$beta_0 + post$beta_1 * (2)
+
+# plotting the distribution of these values
+ggplot(as.data.frame(mu_at_2), mapping = aes(x = mu_at_2)) +
+  geom_density()
+
+# printing the interval of these values. 
+PI(mu_at_2, prob = .89)
+```
+
+# Uncertainty for a given predictor level
+
+Whilst this is okay, we need to do this calculation for every value of TTLCfailure in order to generate the uncertainty around the regression line. This can be done with the *link()* function. This creates a matrix of mu values. Each column represents a data point (corresponding to the 345 data points in the example data frame). Each column contains a thousand samples that generate a posterior distribution for each sample. If we have 345 different participants, this would be a posterior distribution for each of them. 
+
+However, we want a posterior distribution of mu for each value of TTLCfailure. We can this with a few more lines of code. Now we have posterior distributions of mu for each level of TTLCfailure in the plot below. Each pile of points is a Gaussian distribution of the mu_i for each given level of TTLCfailure. 
+
+We can summarise these distributions by plotting a shaded area over our MAP regression line estimate. 
+
+```{r}
+# creates matrix  of posterior distributions for each data point in the original data frame
+mu <- link(m4.4)
+
+# define sequence of TTLCfailures to compute predictions
+ttlc.failure.seq <- seq(from = 1, to = 3, by = .1)
+
+# use link to compute mu for each sample for every value of TTLCfailure
+mu <- link(m4.4, data = data.frame(ttlc.failure = ttlc.failure.seq))
+
+# converting dataframe to long format and extracting variable name
+mu.long <- as.data.frame(mu) %>%
+  pivot_longer(cols = 1:21,
+               names_to = "ttlc",
+               values_to = "mu.post")
+
+# extracting variable names
+v.names <- mu.long %>%
+  dplyr::select(ttlc) %>%
+  dplyr::mutate(frame = row_number()) %>%
+  dplyr::filter(frame <= 21)
+
+# combining ttlc.failure values with variable names
+ttlc.failure.seq <- data.frame(ttlc.failure = ttlc.failure.seq, ttlc = v.names$ttlc, frame = v.names$frame)
+
+# merging posterior distributions of mu with ttlc.failure values. 
+mu.long <- merge(mu.long, ttlc.failure.seq, by = c("ttlc"))
+
+# plotting distribution of mu for each TTLCfailure level
+ggplot(mu.long, mapping = aes(x = ttlc.failure, mu.post)) +
+  geom_point(fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  ylim(.3, 2.5)
+
+# summarise distribution of mu and PI intervals
+mu.mean <- data.frame(mu.mean = apply(mu, 2, mean)) %>%
+  dplyr::mutate(frame = row_number()) 
+
+mu.mean <- merge(mu.mean, ttlc.failure.seq, by = c("frame"))
+
+mu.mean <- mu.mean %>%
+  dplyr::arrange(ttlc.failure)
+
+# intervals
+mu.PI <- as.data.frame(apply(mu, 2, PI, prob = .89)) %>%
+  tibble::rownames_to_column(var = "PI") %>%
+  pivot_longer(cols = 2:22,
+               names_to = "ttlc",
+               values_to = "mu.PI") %>%
+  pivot_wider(names_from = PI,
+              values_from = mu.PI)
+  
+mu.PI <- merge(mu.PI, ttlc.failure.seq, by = c("ttlc"))
+
+mu.PI <- mu.PI %>%
+  dplyr::arrange(ttlc.failure) %>%
+  dplyr::select("5%", "94%")
+
+mu.mean.PI <- dplyr::bind_cols(mu.mean, mu.PI)
+
+# plotting posterior distribution estimate of the mean and the intervals surrounding it
+ggplot() +
+  geom_point(example.bends.full, mapping = aes(x = ttlc.failure, y = ttlc.takeover), position = position_jitter(seed = 42, width = 0.02), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_line(mu.mean.PI, mapping = aes(x = ttlc.failure, y = mu.mean)) +
+  geom_ribbon(mu.mean.PI, mapping = aes(x = ttlc.failure, y = mu.mean, ymin = `5%`, ymax = `94%`), alpha = .5) +
+   ylim(0, 2.5) +
+   ggtitle(expression(mu ~ "of" ~ TTLC[takeover] ~ "with 89% intervals"))
+```
+
+# Prediction intervals
+
+We have previously computed credible intervals for the average TTLCtakeover (mu). But we can also create 89% intervals for predicting TTLCtakeover in general. To do this, we incorporate the standard deviation (sigma). Lets look at the likelihood of our model:
+
+TTLCtakeover_i = Normal(mu_i, sigma)
+
+So far we have used samples from the posterior distribution to visualise uncertainty of the mu_i. However, predictions of TTLCtakeover in general also depend on the standard deviation (sigma). 
+
+For each value of TTLCfailure, we sample from a Gaussian distribution with the correct value of mu for that weight using the correct value of sigma sampled from the same posterior distribution. Doing this for every sample from the posterior, for every value of TTLCfailure, you will get a sample of TTLCtakeover values that encompass the uncertainty of the posterior and uncertainty of the Gaussian distribution of TTLCtakeover values. The *sim()* allows us to do that.
+
+The output is much like the earlier one but contains simulated TTLCtakeover values, rather than values of mu. We then compute an interval for these TTLCtakeover values.
+
+```{r}
+# example ttlc.failure values
+ttlc.failure.seq <- seq(from = 1, to = 3, by = .1)
+
+# simulating ttlc.takeover values that embody uncertainty of posterior and of the likelihood
+sim.ttlc.takeover <- sim(m4.4, data = list(ttlc.failure = ttlc.failure.seq))
+
+# calculating prediction intervals and connecting to mu.mean dataframe
+ttlc.takeover.PI <- apply(sim.ttlc.takeover, 2, PI, prob = .89)
+
+ttlc.takeover.PI <- as.data.frame(apply(sim.ttlc.takeover, 2, PI, prob = .89)) %>%
+  tibble::rownames_to_column(var = "PI") %>%
+  pivot_longer(cols = 2:22,
+               names_to = "ttlc",
+               values_to = "sim.ttlc.takeover.PI") %>%
+  pivot_wider(names_from = PI,
+              values_from = sim.ttlc.takeover.PI) %>%
+  dplyr::bind_cols(data.frame(ttlc.failure = ttlc.failure.seq)) %>%
+  dplyr::select(`5%`, `94%`) %>%
+  dplyr::bind_cols(mu.mean)
+  
+# plot with prediction intervals
+ggplot() +
+  geom_point(example.bends.full, mapping = aes(x = ttlc.failure, y = ttlc.takeover), position = position_jitter(seed = 42, width = 0.02), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_line(mu.mean.PI, mapping = aes(x = ttlc.failure, y = mu.mean)) +
+  geom_ribbon(mu.mean.PI, mapping = aes(x = ttlc.failure, y = mu.mean, ymin = `5%`, ymax = `94%`), alpha = .2) +
+  geom_ribbon(ttlc.takeover.PI, mapping = aes(x = ttlc.failure, y = mu.mean, ymin = `5%`, ymax = `94%`), alpha = .5) +
+  ylim(0, 2.5) +
+  ggtitle(expression(TTLC[takeover] ~ "with 89% prediction intervals"))
+```
+
+# A key thing to note
+
+There are two kinds of uncertainty in the above example. There is uncertainty of the parameter values, and uncertainty in the sampling process. These concepts are distinct despite being computed in very similar ways. 
+
+The posterior distribution ranks the relative implausibilities of every combination of parameter values (beta_0, beta_1, and sigma). 
+
+The simulated outcomes of TTLCtakeover are distributions that includes sampling variation from the process that generates Gaussian random variables. This variation is still a model assumption. 
+
+
+## Categorical independent variables
+
+Sometimes independent variables are not continuous but categorical. Our regression model can still account for this. One way of doing this is to use indicator variable that codes the variable at two levels: as a 0 or a 1. This generates a model like this:
+
+TTLCtakeover ~ Normal(mu_i, sigma)
+
+mu_i = beta_0 + beta_1_x_i
+
+beta_0 ~ Normal(0, 1)
+
+beta_1 ~ Normal(0, 5)
+
+sigma ~ Uniform(0, 1)
+
+
+For this model, the 1 turns the beta_1 parameter on or off (on when optic flow is full, off when optic flow contrast is reduced). Hence the predictor x_i only influences prediction when x_i = 1. When x_i = 0, the beta_1 parameter is multiplied by 0 and thus mu_i = beta_0. When x_i = 1, mu_i = beta_0 + beta_1_x_i. The beta_1 parameter therefore represents the expected difference in TTLCtakeover between when optic flow is full versus reduced.  
+
+This is a fine why to parameterise the model, but it does have a number of draw backs. 
+
+1) It means the beta_1 parameter represents the difference in TTLCtakeover between full optic flow and reduced optic flow. This can be hard to specify priors for if we don't have an intuitive sense of how big differences could be.
+
+2) We have more uncertainty around predicting the full contrast flow condition because it requires two priors (one for beta_0, one for beta_1). We can see if we plot the distribution of our estimates of mu_i for full flow and reduced flow based on our priors. For full flow, the estinate for mu_i is comprised of:
+
+beta_0 + beta_1
+
+for reduced flow, the estimate of mu_i is comprised of:
+
+beta_0
+
+Note how the distribution of plausible parameter values is larger for the full optic flow condition. This is because we have uncertainty for 2 parameters that are estimated. 
+
+```{r}
+
+
+
+```
+
+
+
+```{r}
+example.bends.critical <- example.bends %>%
+  dplyr::mutate(road.contrast.index = case_when(road.contrast == "Full flow" ~ 1,
+                                                road.contrast == "Reduced flow" ~ 2))
+```
+
+# Creating a generative model
+
+F -> TTLCtakeover <- (U)
+
+```{r}
+ggplot(example.bends, mapping = aes(x = ttlc.takeover, col = as.factor(road.contrast))) +
+  geom_density()
+
+sim_ttlc_takeover_flow <- function(f, beta_0){
+    N <- length(f)
+    #ttlc.failure <- runif(100, min = 1, max = 3)
+    ttlc.takeover <- beta_0[f] + rnorm(N, 0, 1)
+    data.frame(f, ttlc.takeover)
+}
+
+f <- rbern(100) + 1
+dat <- sim_ttlc_takeover_flow(f, beta_0 = c(.5, 1.5))
+
+ggplot(dat, mapping = aes(ttlc.takeover, col = as.factor(f))) +
+  geom_density()
+```
+
+# Testing the generative model
+
+```{r}
+formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
+                      mu <- beta_0[f],
+                      beta_0[f] ~ dnorm(0, 1),
+                      sigma ~ dunif(0, 1))
+
+m4.5 <- quap(formula_list, data = dat)
+
+precis(m4.5, depth = 2)
+```
+
+# Using real data
+
+```{r}
+
+formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
+                      mu <- beta_0[road.contrast.index],
+                      beta_0[road.contrast.index] ~ dnorm(0, 1),
+                      sigma ~ dunif(0, 10))
+
+m4.6 <- quap(formula_list, data = example.bends.critical)
+
+precis(m4.6, depth = 2)
+```

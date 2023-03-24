@@ -1,0 +1,327 @@
+---
+title: "Statistical Rethinking - Causal Inference Example"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages 
+
+```{r}
+if(!require(here)) install.packages("here")
+library(here)
+
+if(!require(ggplot2)) install.packages("ggplot2")
+library(ggplot2)
+
+if(!require(dplyr)) install.packages("dplyr")
+library(dplyr)
+
+if(!require(tidyr)) install.packages("tidyr")
+library(tidyr)
+
+if(!require(viridis)) install.packages("viridis")
+library(viridis)
+
+if(!require(rstan)) install.packages("rstan")
+library(rstan)
+
+if(!require(cmdstanr)) install.packages("cmdstanr")
+library(cmdstanr)
+
+if(!require(dagitty)) install.packages("dagitty")
+library(dagitty)
+
+devtools::install_github("rmcelreath/rethinking")
+library(rethinking)
+```
+
+## Purpose of this analysis
+
+This document will will contain a worked example or causal inference from the `rethinking` package. I can then use this example simulate other examples from across disciplines. 
+
+## Loading data
+
+First I load the example data
+
+```{r}
+# load data
+data("WaffleDivorce")
+d <- WaffleDivorce
+
+# standardise the measures of interest
+d$D <- standardize(d$Divorce)
+d$M <- standardize(d$Marriage)
+d$A <- standardize(d$MedianAgeMarriage)
+```
+
+## Plotting the data
+
+Plotting the data we see that divorce rate and marriage rate have a positive correlation (higher marriage rates are associated with higher divorce rates). We also see that median age at marriage and divorce rates have a negative correlation (people who get married later have reduced divorce rates).
+
+```{r}
+ggplot(d, mapping = aes(x = Marriage, y = Divorce)) +
+  geom_point(fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  ylab("Divorce rate") +
+  xlab("Marriage rate") +
+  ggtitle("Marriage rate vs Divorce rate")
+
+ggplot(d, mapping = aes(x = MedianAgeMarriage, y = Divorce)) +
+  geom_point(fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  ylab("Divorce rate") +
+  xlab("Median age at marriage") +
+  ggtitle("Median age at marriage vs Divorce rate")
+```
+
+## Fitting an initial model
+
+We can fit a model that replicates the Age vs Divorce graph as follows:
+
+D_i ~ Normal(mu_i, sigma)
+mu_i = beta_0 + beta_A_A_i 
+beta_0 ~ Normal(0, 0.2)
+beta_A ~ Normal(0, 0.5)
+sigma ~ Exponential(1)
+
+```{r}
+# fit the model
+m1.a <- quap(alist(D ~ dnorm(mu, sigma),
+                   mu <- beta_0 + beta_a * A,
+                   beta_0 ~ dnorm(0, 0.2),
+                   beta_a ~ dnorm(0, 0.5),
+                   sigma ~ dexp(1)),
+                   data = d)
+
+# produce posterior draws form the posterior distribution
+post <- extract.samples(m1.a, n = 1000)
+ggplot(post, mapping = aes(beta_a)) +
+  geom_density()
+```
+
+## Prior predictive simulation
+
+We can simulate these priors to see what they look like in the outcome space. These regressions lines do have some implausibly strong associations however most are within a range of acceptable limits. 
+
+```{r}
+set.seed(10)
+# extracting priors
+prior <- extract.prior(m1.a)
+
+# computing mu using the prior distribution and values -2 SDs to +2 SDs from the mean
+mu <- link(m1.a, post = prior, data = list(A = c(-2, 2)))
+
+# plotting estimates from prior predictive simulation
+ggplot() +
+  geom_abline(mapping = aes(intercept = mu[1:50, 1], slope = mu[1:50, 2])) +
+  xlim(-2, 2) +
+  ylim(-2, 2) +
+  xlab("Median age marriage (std)") +
+  ylab("Divorce rate (std)") +
+  ggtitle("Prior predictive simulation")
+```
+
+## Computing posterior and plotting estimates for divorce rate as a function of age at marriage
+
+Take draws from the posterior distribution, and compute the mean estimate alongside some intervals. The *link()* function using the quap model, sample from the posterior distribution, and compute values of mu for each case in the data. In this case, I compute mu for each value of the age sequence (i.e. what is the mean divorce rate for every SD values of median age at marriage). 
+
+```{r}
+# a sequences of standard deviations from -3 to 3
+age_seq <- seq(from = -3, to = 3.2, length.out = 30)
+
+# compute values of mu from the model 
+mu <- link(m1.a, data = list(A = age_seq))
+
+# compute the mean estimate
+mu.mean <- data.frame(mu.mean = apply(mu, 2, mean)) %>%
+  dplyr::mutate(frame = row_number()) 
+
+# computing 89% credible intervals
+mu.PI <- as.data.frame(apply(mu, 2, PI, prob = .89)) %>%
+  tibble::rownames_to_column(var = "PI") %>%
+  pivot_longer(cols = 2:31,
+               names_to = "D",
+               values_to = "mu.PI") %>%
+  pivot_wider(names_from = PI,
+              values_from = mu.PI) %>%
+  dplyr::mutate(frame = row_number()) %>%
+  dplyr::select(2:4)
+
+# merge mean and 89% CIs
+mu.mean.PI <- merge(mu.mean, mu.PI, by = c("frame"))
+
+# merge means + 89% CIs with age sequence data
+age_seq <- data.frame(A = age_seq) %>%
+  dplyr::mutate(frame = row_number())
+
+mu.mean.PI <- merge(mu.mean.PI, age_seq, by = c("frame"))
+
+# plotting model estimate for median age at marriage vs divorce rate
+ggplot() +
+  geom_point(d, mapping = aes(x = A, y = D), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_line(mu.mean.PI, mapping = aes(x = A, y = mu.mean)) +
+  geom_ribbon(mu.mean.PI, mapping = aes(x = A, y = mu.mean, ymin = `5%`, ymax = `94%`), alpha = .5) +
+  xlab("Median age marriage (std)") +
+  ylab("Divorce rate (std)") 
+```
+
+## Model parameter estimates 
+
+beta_1_A indicates negative association between median age at marriage and divorce rate. 
+
+```{r}
+precis(m1.a)
+```
+
+## Computing posterior and plotting estimates for divorce rate as a function of marriage rate
+
+Now we compute the same model and plot for divorce rate as a function of marriage rate
+
+D_i ~ Normal(mu_i, sigma)
+mu_i = beta_0 + beta_M_M_i 
+beta_0 ~ Normal(0, 0.2)
+beta_M ~ Normal(0, 0.5)
+sigma ~ Exponential(1)
+
+```{r}
+# fit the model
+m1.m <- quap(alist(D ~ dnorm(mu, sigma),
+                   mu <- beta_0 + beta_m * M,
+                   beta_0 ~ dnorm(0, 0.2),
+                   beta_m ~ dnorm(0, 0.5),
+                   sigma ~ dexp(1)),
+                   data = d)
+
+
+# a sequences of standard deviations from -3 to 3
+marriage_seq <- seq(from = -3, to = 3.2, length.out = 30)
+
+# compute values of mu from the model 
+mu <- link(m1.m, data = list(M = marriage_seq))
+
+# compute the mean estimate
+mu.mean <- data.frame(mu.mean = apply(mu, 2, mean)) %>%
+  dplyr::mutate(frame = row_number()) 
+
+# computing 89% credible intervals
+mu.PI <- as.data.frame(apply(mu, 2, PI, prob = .89)) %>%
+  tibble::rownames_to_column(var = "PI") %>%
+  pivot_longer(cols = 2:31,
+               names_to = "D",
+               values_to = "mu.PI") %>%
+  pivot_wider(names_from = PI,
+              values_from = mu.PI) %>%
+  dplyr::mutate(frame = row_number()) %>%
+  dplyr::select(2:4)
+
+# merge mean and 89% CIs
+mu.mean.PI <- merge(mu.mean, mu.PI, by = c("frame"))
+
+# merge means + 89% CIs with age sequence data
+marriage_seq <- data.frame(M = marriage_seq) %>%
+  dplyr::mutate(frame = row_number())
+
+mu.mean.PI <- merge(mu.mean.PI, marriage_seq, by = c("frame"))
+
+# plotting model estimate for median age at marriage vs divorce rate
+ggplot() +
+  geom_point(d, mapping = aes(x = M, y = D), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_line(mu.mean.PI, mapping = aes(x = M, y = mu.mean)) +
+  geom_ribbon(mu.mean.PI, mapping = aes(x = M, y = mu.mean, ymin = `5%`, ymax = `94%`), alpha = .5) +
+  xlab("Marriage rate (std)") +
+  ylab("Divorce rate (std)") 
+```
+
+## Model parameter estimates 
+
+beta_1_M indicates positive association between marriage rate and divorce rate. 
+
+```{r}
+precis(m1.m)
+```
+
+## Producing causal models
+
+A directed acyclic graph (DAG) helps us to understand causal inference within the data. Is it *direct* because arrows point towards which variables causally influence other variables and it is acyclic because causes do not flow back into themselves. 
+
+One potential causal model explains the outputs from m1.a and m1.m is the following:
+
+```{r}
+dag.1 <- dagitty("dag{A -> D; A -> M; M -> D}")
+coordinates(dag.1) <- list(x = c(A = 0, D = 1, M = 2), y = c(A = 0, D = 1, M = 0))
+drawdag(dag.1)
+```
+
+In this DAG, A directly influences D, A directly influences M, and  M directly influences D.
+
+m1.a produces estimates the _total influence_ of age at marriage on divorce rate. The total influence is made up of ages direct influence on divorce rate (people who marry younger have more time to grow up and part from their partner; A -> D) and ages indirect effect on divorce rate through marriage rate (if more young people get married, the marriage rate goes up because there are more young than old people, and thus divorce rates raise; A -> M -> D).
+
+However from the plots, we know from m1.m that the indirect path (A -> M -> D) cannot be right because marriage rate on its own is positively associated with divorce rate. We cannot be sure that the direct effect of M -> D is true either. Because age at marriage could be influences both marriage rate and divorce rate without any direct link between marriage rate and divorce rate:
+
+```{r}
+dag.2 <- dagitty("dag{A -> D; A -> M}")
+coordinates(dag.2) <- list(x = c(A = 0, D = 1, M = 2), y = c(A = 0, D = 1, M = 0))
+drawdag(dag.2)
+```
+
+This DAG is consistent for m1.a and m1.m because both M and D share information from A. As age at marriage increases, so does the divorce rate (A -> D). If more young people get married, the marriage rate increases (A -> M). Hence divorce rate and marriage rate both increases and is correlated together would produce  a positive (although spurious) correlation. 
+
+## Conditional independencies 
+
+Conditioning on variable Z means that if we know Z, does knowing X provide any additional information on Y. If it doesn't provide any additional information, we can say that Y is independent of X conditional on Z or:
+
+Y _||_ X | Z. 
+
+For the first DAG, all variables are causally related and thus none of the variables are independent of each other. However for the second DAG, D and M both share a common cause and do not share a casual link. Hence if we conditional on A, D and M are independent:
+
+D _||_ M | A
+
+or:
+
+```{r}
+impliedConditionalIndependencies(dag.1)
+impliedConditionalIndependencies(dag.2)
+```
+
+## Implications of the conditional independices
+
+Using these DAGs and understanding the conditional independencies, there are testable implications. For example, D and M may be dependent but if we condition on a specific level of A, the should be independent. 
+
+To test this, we need a statistical model that conditions on A and see if that makes D independent from A. Such a model will answer both of these questions:
+
+1) Once I know marriage rate, what additional value is there in knowing age at marriage?
+2) Once I know age at marriage, what additional value is there in knowing marriage rate?
+
+The model parameters will provide the answers to these questions however they still depend on the DAG being useful and believed. 
+
+## Fitting a multiple regression model
+
+We fit a multiple regression model as follows:
+
+D_i ~ Normal(mu_i, sigma)
+mu_i = beta_0 + beta_A_A_i + beta_M_M_i 
+beta_0 ~ Normal(0, 0.2)
+beta_A ~ Normal(0, 0.5)
+beta_M ~ Normal(0, 0.5)
+sigma ~ Exponential(1)
+
+The posterior mean for marriage rate *beta_m* moves close to 0 with the credible intervals either size of 0. However the posterior mean for age at marriage *beta_a* becomes more uncertain but it largely the same. We can interpret this as saying "once we know the median age of marriage, there is little extra predictive power in knowing marriage rate for predicting divorce rate.
+
+This does not mean there is now value in knowing marriage rate. If you didn't know age of marriage, marriage rate would still be useful for knowing divorce rate. However marriage rate *does not cause* divorce rate alter - they are merely correlated. Hence marriage rate is predictive, but not causal. 
+
+```{r}
+# fit the model
+m1.am <- quap(alist(D ~ dnorm(mu, sigma),
+                   mu <- beta_0 + beta_a * A + beta_m * M,
+                   beta_0 ~ dnorm(0, 0.2),
+                   beta_a ~ dnorm(0, 0.5),
+                   beta_m ~ dnorm(0, 0.5),
+                   sigma ~ dexp(1)),
+                   data = d)
+
+precis(m1.am)
+
+plot(coeftab(m1.a, m1.m, m1.am), par = c("beta_a", "beta_m"))
+```
+

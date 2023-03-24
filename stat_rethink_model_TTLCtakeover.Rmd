@@ -1,0 +1,141 @@
+---
+title: "statistical_rethinking_silent_failures_modelling_TTLCtakeover"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## A Gaussian model for TTLCtakeover
+
+# Loading and filtering the data
+
+```{r}
+# height and weight data
+data(Howell1)
+d <- Howell1 %>%
+  dplyr:::filter(age >= 18)
+
+ggplot() +
+  geom_histogram(d, mapping = aes(x = height))
+
+# driving data
+example.bends <- read.csv(file = here::here("intro_to_multilevel_models/example.bends.csv"))
+example.bends <- example.bends %>%
+  dplyr::mutate(road.contrast = case_when(dn == "D" ~ "Full flow",
+                                          dn == "N" ~ "Reduced flow")) %>%
+  dplyr::mutate(road.contrast = as.factor(road.contrast)) %>%
+  dplyr::filter(road.contrast == "Full flow")
+
+# distribution of TTLCtakeover
+ggplot() +
+  geom_density(example.bends, mapping = aes(x = ttlc.takeover))
+```
+
+# Specifying a Gaussian model for TTLCtakeover
+
+TTLCtakeover_i ~ Normal(mu, sigma) *(likelihood)*
+
+mu ~ Normal(1.5, .35) *(prior)*
+
+sigma ~ Uniform(0, 50) *(prior)*
+
+For Bayesian analyses, every parameter that you estimate has an associated probability distribution. Hence we first must specify the prior distribution of said parameter. For a Gaussian model on TTLCtakeover, for each TTLCtakeover (TTLCtakeover_i), we specify our priors for the two parameters of the model (mu and sigma). Sigma specifies the variability and thus must be positive. Mu specifies the mean of TTLCtakeover. 
+
+I have centred mu on 1.82 s. Zeeb et al (2017) found that a control group for a lane deviation experiment had TTLCtakeover values of around 2.15 with a SD deviation of .35. However, this paper does not provide an estimate of the failure criticalities. The intercept parameter of the model fitted by Mole et al (2020) proposed that the fasted a person could respond was around .33 s. 2.15 - .33 = 1.82 and hence this is what I will centre on. I set the SD as .35 as per the Zeeb et al (2017) study. This produces a relatively wide range of potential TTLCtakeover values. 
+
+```{r}
+curve(dnorm(x, 1.82, .35), from = 0.3, to = 3)
+title(main = "Prior distribution for mu")
+
+curve(dunif(x, 0, 1), from = -1, to = 2)
+title(main = "Prior distribution for sigma")
+```
+
+# Prior predictive checks
+
+To make sure that the priors what are chosen are somewhat sensible, we should do a prior predictive check. To do this, we can simulate TTLCtakeovers from the prior and plot them to see if they give sensible values.
+
+Posterior and prior distribution are essentially the same thing but at different stages of the analysis. So you can sample prior distributions as you can sample posterior distributions. Further, a posterior distribution can be a prior distribution for a subsequent analysis. 
+
+My prior predictive check puts most of the mass over 1.5 s, with relatively less probability for values of TTLCtakeover below 0. A TTLCtakeover of less than 0 would indicate that drivers had taken over once they had left the road. This is a possible response but unlikely given the task instructions. I am therefore happy with this prior. 
+
+```{r}
+sample_mu <- rnorm(10000, 1.82, .35)
+sample_sigma <- runif(10000, 0, 1)
+prior_check <- rnorm(10000, sample_mu, sample_sigma)
+
+dens(prior_check)
+title(main = "Prior predictive simulation for height using mu and sigma priors")
+```
+If we change the standard deviation of the mu prior, we get a flatter, less informative prior that produces more weight at the tails of the distribution. A prior of:
+
+mu ~ Normal(1.5, 2) 
+
+Gives more probability of people, before seeing the data, having negative TTLCtakeover responses. This is possible of course but this amount of probability should not be given. 
+
+```{r}
+sample_mu <- rnorm(10000, 1.82, 2)
+sample_sigma <- runif(10000, 0, 1)
+prior_check <- rnorm(10000, sample_mu, sample_sigma)
+
+dens(prior_check)
+title(main = "Prior predictive simulation using mu ~ Normal(1.82, 2)")
+```
+
+# Fitting a TTLCtakeover model using quap() function
+
+We specify the likelihood and priors into the model:
+
+TTLCtakeover_i ~ Normal(mu, sigma)
+
+mu ~ Normal(1.5, 1)
+
+sigma ~ Uniform(0, 1)
+
+```{r}
+formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
+                      mu ~ dnorm(1.82, .35),
+                      sigma ~ dunif(0, 1))
+
+m4.1 <- quap(formula_list, data = example.bends)
+
+precis(m4.1)
+```
+
+The plausibility of each value of mu, after averaging over plausibilities of each value of sigma, is given by a Gaussian distribution with a mean of 1.09 and a SD of 0.02.
+
+The intervals denotes 89% interval boundaries of the posterior distribution. 
+
+Priors for this example are fairly strong because I have a relatively good idea about what the mean TTLCtakeover should be based on previous work (Mole et al, 2020; Zeeb et al, 2017).
+
+# Sampling from the model
+
+The posterior distribution that is estimated in model m4.1 is a multidimensional Gaussian distribution as it contains two parameters (mu and sigma). The approximation of this posterior distribution provides us with the standard deviations (or variances if squared) and correlations between mu and sigma. 
+
+*diag(vcov(m4.1))* provides us with the variances of mu and sigma. The sqrt provides the SD that we find in the *precis()* function above. 
+
+*cov2cor(vcov(m4.1))* provides us with the correlation between mu and sigma. This is very low and it should be - the mean is independent of the variance of a Gaussian distribution. 
+
+
+```{r}
+diag(vcov(m4.1))
+cov2cor(vcov(m4.1))
+```
+
+Now lets sample 10,000 values from the posterior distribution. Each value is sampled from the posterior distribution and thus the values of mu and sigma will be close to the MAP (maximum a posteriori) from the model summary.
+
+Using the *plot()* function on the posterior draws produces a densely populated centre which corresponds to the most probable values of mu and sigma. 
+
+Using the *dens()* function, we can see the shape of the marginal posterior densities of mu and sigma. Marginalised  mean "averaging over the other parameters". 
+
+```{r}
+post <- extract.samples(m4.1, n = 10000)
+precis(post)
+
+plot(post, pch = 16, col = col.alpha(rangi2, 0.1))
+
+dens(post$mu)
+dens(post$sigma)
+```
