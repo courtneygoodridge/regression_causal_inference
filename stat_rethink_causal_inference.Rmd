@@ -10,6 +10,9 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Load packages 
 
 ```{r}
+if(!require(xfun)) install.packages("xfun")
+library(xfun)
+
 if(!require(here)) install.packages("here")
 library(here)
 
@@ -94,7 +97,7 @@ m1.a <- quap(alist(D ~ dnorm(mu, sigma),
                    sigma ~ dexp(1)),
                    data = d)
 
-# produce posterior draws form the posterior distribution
+# produce posterior draws form the posterior distribution for the beta_a parameter
 post <- extract.samples(m1.a, n = 1000)
 ggplot(post, mapping = aes(beta_a)) +
   geom_density()
@@ -306,7 +309,7 @@ beta_A ~ Normal(0, 0.5)
 beta_M ~ Normal(0, 0.5)
 sigma ~ Exponential(1)
 
-The posterior mean for marriage rate *beta_m* moves close to 0 with the credible intervals either size of 0. However the posterior mean for age at marriage *beta_a* becomes more uncertain but it largely the same. We can interpret this as saying "once we know the median age of marriage, there is little extra predictive power in knowing marriage rate for predicting divorce rate.
+The posterior mean for marriage rate *beta_m* moves close to 0 with the credible intervals either size of 0. However the posterior mean for age at marriage *beta_a* becomes more uncertain but it largely the same. We can interpret this as saying "once we know the median age of marriage, there is little extra predictive power in knowing marriage rate for predicting divorce rate".
 
 This does not mean there is now value in knowing marriage rate. If you didn't know age of marriage, marriage rate would still be useful for knowing divorce rate. However marriage rate *does not cause* divorce rate alter - they are merely correlated. Hence marriage rate is predictive, but not causal. 
 
@@ -325,3 +328,95 @@ precis(m1.am)
 plot(coeftab(m1.a, m1.m, m1.am), par = c("beta_a", "beta_m"))
 ```
 
+## Predictor residual plot
+
+These plots show us the outcome against the residual predictor values. First we fit a model regressing one predictor (median age at marriage) against a another predictor (marriage rate). We keep the same priors on the model parameters as previous:
+
+M_i ~ Normal(mu_i, sigma)
+mu_i = beta_0 + beta_A_A_i
+beta_0 ~ Normal(0, 0.2)
+beta_A ~ Normal(0, 0.5)
+sigma ~ Exponential(1)
+
+From the first model, positive residuals mean that the observed marriage rate is *higher* that what would be expected given the median age in a given state. A negative values would mean that marriage rate was *lower* than what would be expected for a given median age in a given state. 
+
+The second model regresses median age at marriage on the marriage rate:
+
+A_i ~ Normal(mu_i, sigma)
+mu_i = beta_0 + beta_M_M_i
+beta_0 ~ Normal(0, 0.2)
+beta_M ~ Normal(0, 0.5)
+sigma ~ Exponential(1)
+
+```{r}
+# fit the model regressing marriage rate onto to age at marriage
+m1.residual <- quap(alist(M ~ dnorm(mu, sigma),
+                   mu <- beta_0 + beta_a * A,
+                   beta_0 ~ dnorm(0, 0.2),
+                   beta_a ~ dnorm(0, 0.5),
+                   sigma ~ dexp(1)),
+                   data = d)
+
+precis(m1.residual)
+mu.m <- link(m1.residual)
+mu_mean.m <- apply(mu.m, 2, mean)
+mu_resid.m <- d$M - mu_mean.m
+
+ggplot() +
+  geom_point(d, mapping = aes(x = A, y = M), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_abline(mapping = aes(intercept = precis(m1.residual)[1, 1], slope = precis(m1.residual)[2, 1])) +
+  xlab("Age at marriage (std)") +
+  ylab("Marriage rate (std)") +
+  ggtitle("Regressing median age at marriage onto marriage rate")
+
+
+# fit the model regressing age at marriage on marriage rate
+m1.residual.2 <- quap(alist(A ~ dnorm(mu, sigma),
+                   mu <- beta_0 + beta_m * M,
+                   beta_0 ~ dnorm(0, 0.2),
+                   beta_m ~ dnorm(0, 0.5),
+                   sigma ~ dexp(1)),
+                   data = d)
+
+precis(m1.residual.2)
+mu.a <- link(m1.residual.2)
+mu_mean.a <- apply(mu.a, 2, mean)
+mu_resid.a <- d$A - mu_mean.a
+
+ggplot() +
+  geom_point(d, mapping = aes(x = M, y = A), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_abline(mapping = aes(intercept = precis(m1.residual.2)[1, 1], slope = precis(m1.residual.2)[2, 1])) +
+  xlab("Marriage rate (std)") +
+  ylab("Age at marriage (std)") +
+  ggtitle("Regressing marriage rate onto median age at marriage")
+```
+
+We can then use the residuals and plot them against the outcome variable of interest (divorce rate). 
+
+For the first plot, we see no association between divorce rate and the marriage rate residuals. This plot can be thought about as plotting the linear  relationship pf divorce rate on marriage rate conditioning on  median age at marriage (i.e. when we already know the information about median age at marriage). Data points to the right of the dashed line have higher marriage rates than expected, the left is lower marriage rates than expected. However, there is little relationship.
+
+The second plots highlights a negative association between divorce rate and median age at marriage residuals. This highlights that people who marry later than expected for a given marriage rate have less divorces. 
+
+This procedure highlights what is happening in the main model outputs by subtracting out the influence of the other predictor. 
+
+```{r}
+# divorce rate and marriage rate residuals
+ggplot() +
+  geom_point(d %>%
+               dplyr::bind_cols(as.data.frame(mu_resid.m)), mapping = aes(x = mu_resid.m, y = D), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_vline(d %>%
+               dplyr::bind_cols(as.data.frame(mu_resid.m)), mapping = aes(x = mu_resid.m, y = D, xintercept = 0), linetype = "dashed") +
+  xlab("Marriage rate residuals") +
+  ylab("Divorce rate (std)") +
+  ggtitle("Relationship between divorce rate and marriage rate residuals")
+
+# divorce rate and median age at marriage residuals
+ggplot() +
+  geom_point(d %>%
+               dplyr::bind_cols(as.data.frame(mu_resid.a)), mapping = aes(x = mu_resid.a, y = D), fill = "lightblue", pch = 21, size = 2, alpha = 0.8) +
+  geom_vline(d %>%
+               dplyr::bind_cols(as.data.frame(mu_resid.a)), mapping = aes(x = mu_resid.a, y = D, xintercept = 0), lineytype = "dashed") +
+  xlab("Marriage rate residuals") +
+  ylab("Divorce rate (std)") +
+  ggtitle("Relationship between divorce rate and median age at marriage residuals")
+```

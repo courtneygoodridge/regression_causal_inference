@@ -479,8 +479,6 @@ There are two kinds of uncertainty in the above example. There is uncertainty of
 The posterior distribution ranks the relative implausibilities of every combination of parameter values (beta_0, beta_1, and sigma). 
 
 The simulated outcomes of TTLCtakeover are distributions that includes sampling variation from the process that generates Gaussian random variables. This variation is still a model assumption. 
-
-
 ## Categorical independent variables
 
 Sometimes independent variables are not continuous but categorical. Our regression model can still account for this. One way of doing this is to use indicator variable that codes the variable at two levels: as a 0 or a 1. This generates a model like this:
@@ -496,13 +494,13 @@ beta_1 ~ Normal(0, 5)
 sigma ~ Uniform(0, 1)
 
 
-For this model, the 1 turns the beta_1 parameter on or off (on when optic flow is full, off when optic flow contrast is reduced). Hence the predictor x_i only influences prediction when x_i = 1. When x_i = 0, the beta_1 parameter is multiplied by 0 and thus mu_i = beta_0. When x_i = 1, mu_i = beta_0 + beta_1_x_i. The beta_1 parameter therefore represents the expected difference in TTLCtakeover between when optic flow is full versus reduced.  
+For this model, the 1 turns the beta_1 parameter on or off (on when optic flow is full, off when optic flow contrast is reduced). Hence the predictor x_i only influences prediction when x_i = 1. When x_i = 0, the beta_1 parameter is multiplied by 0 and thus *mu_i = beta_0*. When x_i = 1, *mu_i = beta_0 + beta_1_x_i*. The beta_1 parameter therefore represents the expected difference in TTLCtakeover between when optic flow is full versus reduced.  
 
 This is a fine why to parameterise the model, but it does have a number of draw backs. 
 
 1) It means the beta_1 parameter represents the difference in TTLCtakeover between full optic flow and reduced optic flow. This can be hard to specify priors for if we don't have an intuitive sense of how big differences could be.
 
-2) We have more uncertainty around predicting the full contrast flow condition because it requires two priors (one for beta_0, one for beta_1). We can see if we plot the distribution of our estimates of mu_i for full flow and reduced flow based on our priors. For full flow, the estinate for mu_i is comprised of:
+2) We have more uncertainty around predicting the full contrast flow condition because it requires two priors (one for beta_0, one for beta_1). We can see if we plot the distribution of our estimates of mu_i for full flow and reduced flow based on our priors. For full flow, the estimate for mu_i is comprised of:
 
 beta_0 + beta_1
 
@@ -513,12 +511,13 @@ beta_0
 Note how the distribution of plausible parameter values is larger for the full optic flow condition. This is because we have uncertainty for 2 parameters that are estimated. 
 
 ```{r}
+mu_reduced_flow <- rnorm(1000, 1, 20)
+mu_full_flow <- rnorm(1000, 1, 20) + rnorm(1000, 5, 20)
 
-
-
+precis(data.frame(mu_reduced_flow, mu_full_flow))
 ```
 
-
+We can get around this by using indexing. We assign an integer to each level of the categorical variable. *1* means "full flow" and *2* means "reduced flow". The order doesn't matter. 
 
 ```{r}
 example.bends.critical <- example.bends %>%
@@ -530,15 +529,22 @@ example.bends.critical <- example.bends %>%
 
 F -> TTLCtakeover <- (U)
 
+We create a generative model where mean TTLCtakeover for full flow is TTLCtakeover is centred on a mean of 1.5 s; for redeuced flow it is centred on 0.5 s.
+
 ```{r}
 ggplot(example.bends, mapping = aes(x = ttlc.takeover, col = as.factor(road.contrast))) +
   geom_density()
 
 sim_ttlc_takeover_flow <- function(f, beta_0){
-    N <- length(f)
-    #ttlc.failure <- runif(100, min = 1, max = 3)
-    ttlc.takeover <- beta_0[f] + rnorm(N, 0, 1)
-    data.frame(f, ttlc.takeover)
+  
+  N <- length(f)
+  # Gaussian distributed for unobserved variables
+  U <- rnorm(N, 0, 1)
+  #ttlc.failure <- runif(100, min = 1, max = 3)
+  
+  # TTLC at takekover is predicted by an indexed beta_0 parameter plus some normally distributed unobserved variance
+  ttlc.takeover <- beta_0[f] + U
+  data.frame(f, ttlc.takeover)
 }
 
 f <- rbern(100) + 1
@@ -547,8 +553,9 @@ dat <- sim_ttlc_takeover_flow(f, beta_0 = c(.5, 1.5))
 ggplot(dat, mapping = aes(ttlc.takeover, col = as.factor(f))) +
   geom_density()
 ```
-
 # Testing the generative model
+
+We test the generative model to see if it recovers were parameters we gave it.It covers the parameters reasonably well and thus we move onto the the real data. 
 
 ```{r}
 formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
@@ -563,7 +570,16 @@ precis(m4.5, depth = 2)
 
 # Using real data
 
+First I plot the distribution of the data for flow condition. The distributions are very similar and most of the mass is centred over 1 s.
+
+I then fit the model with my indexed beta_0 parameter and relevant priors for beta_0 and sigma. 
+
+m4.6 is the model and the *precis()* function provides the output. The parameter values are easy enough to interpret - the expected TTLCtakeover for each flow condition. 
+
 ```{r}
+# distributions of TTLCtakeover for each road contrast
+ggplot(example.bends, mapping = aes(x = ttlc.takeover, col = as.factor(road.contrast))) +
+  geom_density()
 
 formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
                       mu <- beta_0[road.contrast.index],
@@ -573,4 +589,14 @@ formula_list <- alist(ttlc.takeover ~ dnorm(mu, sigma),
 m4.6 <- quap(formula_list, data = example.bends.critical)
 
 precis(m4.6, depth = 2)
+```
+
+## Generating contrasts
+
+We can compute differences between the flow conditions directly from the posterior distribution. 
+
+```{r}
+post <- extract.samples(m4.6)
+post$diff_reduced_flow <- post$beta_0[, 1] - post$beta_0[, 2] 
+precis(post, depth = 2)
 ```
